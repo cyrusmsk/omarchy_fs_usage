@@ -1,0 +1,17 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/omarchy_fs_usage
+omarchy_fs_usage.so
+omarchy_fs_usage.dylib
+omarchy_fs_usage.dll
+libomarchy_fs_usage.a
+omarchy_fs_usage.a
+omarchy_fs_usage.lib
+omarchy_fs_usage-test-*
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst

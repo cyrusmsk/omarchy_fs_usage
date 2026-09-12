@@ -1,0 +1,26 @@
+{
+	"name": "omarchy_fs_usage",
+	"description": "Omarchy-flavored graphical front-end for btdu, the sampling disk usage profiler for btrfs",
+	"authors": [
+		"Sergei Giniatulin"
+	],
+	"copyright": "Copyright © 2026, Sergei Giniatulin",
+	"license": "MIT",
+	"mainSourceFile": "source/main.d",
+	"stringImportPaths": [
+		"source"
+	],
+	"dependencies": {
+		"dqt:quickcontrols2": {
+			"repository": "git+https://github.com/tim-dlang/dqt.git",
+			"version": "~master"
+		},
+		"dqt:test": {
+			"repository": "git+https://github.com/tim-dlang/dqt.git",
+			"version": "~master"
+		}
+	},
+	"lflags-linux": [
+		"-Wl,--exclude-libs,ALL"
+	]
+}
