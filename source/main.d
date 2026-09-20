@@ -116,6 +116,7 @@ int main()
 	// caller (see README "Memory management").
 	KeyBot keyBot = null;
 	ClickBot clickBot = null;
+	CompareBot cmpBot = null;
 	if (environment.get("FSU_AUTOTEST", null) == "1")
 		keyBot = new KeyBot(app, logic);
 
@@ -123,6 +124,11 @@ int main()
 	// (row taps navigate, like the keyboard does) and verify survival.
 	if (environment.get("FSU_AT_CLICKS", null) == "1")
 		clickBot = new ClickBot(app, logic, engine);
+
+	// Advanced-tabs probe: baseline deltas, snapshot estimator,
+	// insights object, tab-switch shortcuts.
+	if (environment.get("FSU_AT_COMPARE", null) == "1")
+		cmpBot = new CompareBot(app, logic);
 
 	return app.exec();
 }
@@ -578,6 +584,172 @@ private:
 	QTimer timer;
 	int step;
 	int clickIdx;
+}
+
+/// Verifies the advanced tabs headlessly: loads a baseline export,
+/// checks the computed deltas, the snapshot estimator and the insights
+/// object, exercises the tab-switch shortcuts, and checks the browse
+/// rows carry delta annotations.
+final class CompareBot : QObject
+{
+	mixin(Q_OBJECT_D);
+
+public:
+	Logic logic;
+
+	this(QObject parent = null, Logic logic = null)
+	{
+		import core.stdcpp.new_;
+		super(parent);
+		this.logic = logic;
+		timer = cpp_new!QTimer(this);
+		timer.setInterval(500);
+		QObject.connect(timer.signal!"timeout", this.slot!"tick");
+		timer.start();
+	}
+
+	@QSlot void tick()
+	{
+		import std.json : JSONType, parseJSON;
+		import std.process : environment;
+		import std.stdio : writeln;
+		import std.string : indexOf;
+		import qt.core.coreapplication;
+		import qt.core.global : qsizetype;
+		import qt.core.string : QString;
+		step++;
+		writeln("CMPTEST step ", step);
+
+		void fail(string msg)
+		{
+			writeln("CMPTEST-FAIL ", msg);
+			QCoreApplication.quit();
+		}
+
+		if (step > 30)
+		{
+			fail("timeout");
+			return;
+		}
+		if (logic is null)
+			return;
+
+		static string qstr(const QString s)
+		{
+			auto ba = s.toUtf8();
+			return ba.data[0 .. ba.size].idup;
+		}
+
+		if (step == 1)
+		{
+			string base = environment.get("FSU_AT_BASELINE",
+				"testdata/baseline.json");
+			writeln("CMPTEST loading baseline ", base);
+			logic.setBaseline(QString.fromUtf8(base.ptr,
+				cast(qsizetype) base.length));
+			return;
+		}
+		if (step == 2)
+		{
+			auto cmp = parseJSON(qstr(logic.compareJson()));
+			if (cmp.object["hasBaseline"].type != JSONType.true_)
+			{
+				fail("no baseline: "
+					~ ("baselineError" in cmp.object
+						? cmp.object["baselineError"].str : "?"));
+				return;
+			}
+			bool seenGone, seenGrown, seenShrunk, seenNew;
+			string first;
+			foreach (i, ref r; cmp.object["rows"].array)
+			{
+				auto o = r.object;
+				if (i == 0)
+					first = o["path"].str;
+				if (o["path"].str == "@/oldkernel" && o["isGone"].type == JSONType.true_
+						&& o["deltaBytes"].integer == -3221225472)
+					seenGone = true;
+				if (o["path"].str == "@home/photos" && o["grown"].type == JSONType.true_
+						&& o["deltaBytes"].integer == 1342177280)
+					seenGrown = true;
+				if (o["path"].str == "@/usr/lib" && o["grown"].type == JSONType.false_
+						&& o["deltaBytes"].integer == -1342177280)
+					seenShrunk = true;
+				if (o["path"].str == "@/usr/share" && o["isNew"].type == JSONType.true_
+						&& o["deltaBytes"].integer == 1342177280)
+					seenNew = true;
+			}
+			if (first != "@/oldkernel")
+			{
+				fail("largest mover should be @/oldkernel, got " ~ first);
+				return;
+			}
+			if (!seenGone || !seenGrown || !seenShrunk || !seenNew)
+			{
+				fail("missing movers");
+				return;
+			}
+			writeln("CMPTEST deltas verified");
+
+			if (qstr(logic.snapshotsJson()).indexOf("TREE_259") < 0)
+			{
+				fail("snapshot estimator misses TREE_259");
+				return;
+			}
+			auto ins = parseJSON(qstr(logic.insightsJson()));
+			if (!("darkMatter" in ins.object)
+					|| ins.object["darkMatter"].object["sizeText"].str != "5.00 GiB")
+			{
+				fail("dark matter should read 5.00 GiB");
+				return;
+			}
+			if (qstr(logic.folderJson()).indexOf("deltaText") < 0)
+			{
+				fail("browse rows lack delta annotations");
+				return;
+			}
+			writeln("CMPTEST insights/snapshots/row-deltas verified");
+			return;
+		}
+
+		auto wins = QGuiApplication.allWindows();
+		QWindow win = null;
+		foreach (i; 0 .. wins.size())
+			if (wins[i].isVisible())
+			{
+				win = wins[i];
+				break;
+			}
+		if (win is null)
+			return;
+
+		alias Key = qt.core.namespace.Key;
+		import qt.test.testkeyboard : keyClick;
+		if (step == 3)
+		{
+			writeln("CMPTEST tab 2 (insights)");
+			keyClick(win, Key.Key_2);
+		}
+		else if (step == 4)
+		{
+			writeln("CMPTEST tab 3 (compare)");
+			keyClick(win, Key.Key_3);
+		}
+		else if (step == 5)
+		{
+			writeln("CMPTEST tab 1 (browse)");
+			keyClick(win, Key.Key_1);
+		}
+		else if (step >= 6)
+		{
+			writeln("CMPTEST-OK (compare + insights verified)");
+			QCoreApplication.quit();
+		}
+	}
+
+private:
+	QTimer timer;
+	int step;
 }
 
 // Input synthesis via upstream dqt's QTest bindings (dqt:test):

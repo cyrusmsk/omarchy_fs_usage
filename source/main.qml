@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 
 ApplicationWindow {
     id: win
@@ -63,6 +64,39 @@ ApplicationWindow {
     property var detail: ({ ok: false })
     property bool showDetail: true
     property string lastPhase: ""
+
+    // Advanced tabs: 0 browse · 1 insights · 2 compare.
+    property int activeTab: 0
+    property var snaps: ({ expert: false, rows: [] })
+    property var insights: ({})
+    property var cmp: ({ hasBaseline: false })
+    property bool cmpDeltaSort: true
+    property string saveNote: ""
+    function setTab(i) {
+        win.activeTab = i;
+        if (i === 1)
+            refreshInsights();
+        else if (i === 2)
+            refreshCompare();
+        else
+            focusList();
+    }
+    function refreshInsights() {
+        if (logic) {
+            win.snaps = JSON.parse(logic.snapshotsJson() || '{"rows":[]}');
+            win.insights = JSON.parse(logic.insightsJson() || '{}');
+        }
+    }
+    function refreshCompare() {
+        if (logic)
+            win.cmp = JSON.parse(logic.compareJson() || '{}');
+    }
+    function toggleCmpSort() {
+        win.cmpDeltaSort = !win.cmpDeltaSort;
+        if (logic)
+            logic.setCompareSortByDelta(win.cmpDeltaSort);
+        refreshCompare();
+    }
 
     readonly property bool scanning: sum.phase === "sampling"
     readonly property string target: sum.scanPath || (mounts.length ? mounts[0].path : "/")
@@ -144,6 +178,11 @@ ApplicationWindow {
             else if (win.sum.phase === "idle" && !win.sum.ready)
                 ctaBtn.forceActiveFocus();
         }
+        // Keep the advanced tabs fresh across scans.
+        if (win.activeTab === 1)
+            refreshInsights();
+        else if (win.activeTab === 2)
+            refreshCompare();
     }
 
     // ------------------------------------------------------- tiny UI kit
@@ -549,6 +588,26 @@ ApplicationWindow {
         anchors.fill: parent
         anchors.margins: 16
         spacing: 12
+
+        // tab strip: browse the tree, or open the advanced views
+        TabBar {
+            id: tabBar
+            Layout.fillWidth: true
+            currentIndex: win.activeTab
+            onCurrentIndexChanged: { if (currentIndex !== win.activeTab) win.setTab(currentIndex); }
+            TabButton { text: "Browse  (1)" }
+            TabButton { text: "Insights  (2)" }
+            TabButton { text: "Compare  (3)" }
+        }
+
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: win.activeTab
+
+            // tab 1: browse (the ncdu-style tree)
+            ColumnLayout {
+                spacing: 12
 
         // stats / sampling card
         Rectangle {
@@ -1030,8 +1089,364 @@ ApplicationWindow {
                 font.pixelSize: 10
                 visible: win.rows.length >= 500
             }
-        }
-    }
+            } // results card
+            } // tab 1: browse page
+
+            // tab 2: insights — sampling accuracy, snapshot sizes,
+            // unreachable "dark matter", compression/physical notes
+            ColumnLayout {
+                spacing: 12
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: 12
+                    color: win.card
+                    border.color: Qt.alpha(win.fgDim, 0.3)
+                    border.width: 1
+                    implicitHeight: accCol.implicitHeight + 24
+                    ColumnLayout {
+                        id: accCol
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 18
+                        anchors.rightMargin: 18
+                        spacing: 4
+                        Label {
+                            text: "sampling accuracy — results sharpen the longer btdu runs (≈100 samples ≈ 1% resolution)"
+                            color: win.fgDim
+                            font.pixelSize: 11
+                        }
+                        RowLayout {
+                            spacing: 26
+                            StatBlock {
+                                label: "samples"
+                                value: win.insights.accuracy !== undefined
+                                    ? win.insights.accuracy.samples.toLocaleString() : "—"
+                            }
+                            StatBlock {
+                                label: "≈ resolution"
+                                value: win.insights.accuracy !== undefined
+                                    ? win.insights.accuracy.resolution : "—"
+                            }
+                            StatBlock {
+                                label: "budget"
+                                value: win.insights.accuracy !== undefined
+                                    ? win.insights.accuracy.budget.toLocaleString() : "—"
+                            }
+                            StatBlock {
+                                label: "seed"
+                                value: (win.insights.accuracy !== undefined
+                                    && win.insights.accuracy.seed) || "random"
+                            }
+                            StatBlock {
+                                label: "stop at"
+                                value: win.insights.accuracy !== undefined
+                                    ? [win.insights.accuracy.minRes,
+                                       win.insights.accuracy.maxTime].filter(
+                                        function(s) { return s && s.length; }).join(" · ") || "manual"
+                                    : "—"
+                            }
+                        }
+                        Label {
+                            visible: !win.sum.ready && !win.scanning
+                            text: "no data yet — pick a target and scan (r), or open the browse tab"
+                            color: win.cYellow
+                            font.pixelSize: 12
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 12
+                    color: win.card
+                    border.color: Qt.alpha(win.fgDim, 0.3)
+                    border.width: 1
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 6
+                        Label {
+                            text: "snapshot sizes — with date-ordered snapshot names, each row reads as the data that snapshot introduced"
+                            color: win.fgDim
+                            font.pixelSize: 11
+                            wrapMode: Label.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            visible: (win.snaps.rows || []).length === 0
+                            text: win.snaps.expert === true
+                                ? "no snapshot-like rows in this scan"
+                                : "no snapshot-like rows — and without expert mode (-x) exclusive sizes are unavailable anyway"
+                            color: win.fgDim
+                            font.pixelSize: 12
+                            font.italic: true
+                        }
+                        ListView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            model: win.snaps.rows || []
+                            boundsBehavior: Flickable.StopAtBounds
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: ListView.view.width
+                                height: snapCol.implicitHeight + 12
+                                radius: 7
+                                color: "transparent"
+                                Column {
+                                    id: snapCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    spacing: 2
+                                    Label {
+                                        text: modelData.name + "  ·  " + modelData.sizeText
+                                        color: win.fgBright
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        elide: Label.ElideMiddle
+                                        width: parent.width
+                                    }
+                                    Label {
+                                        text: (modelData.ownText || "") + "  "
+                                            + (modelData.sharedText || "") + "  ·  " + modelData.path
+                                        color: win.cCyan
+                                        font.pixelSize: 10
+                                        elide: Label.ElideMiddle
+                                        width: parent.width
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: 12
+                        color: Qt.alpha(win.cYellow, 0.08)
+                        border.color: Qt.alpha(win.cYellow, 0.5)
+                        border.width: 1
+                        implicitHeight: dmCol.implicitHeight + 24
+                        Column {
+                            id: dmCol
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 16
+                            anchors.rightMargin: 16
+                            spacing: 3
+                            Label { text: "unreachable “dark matter”"; color: win.cYellow; font.bold: true }
+                            Label {
+                                text: win.insights.darkMatter !== undefined
+                                    ? win.insights.darkMatter.sizeText + " no longer covered by live extents"
+                                    : "not present in this scan"
+                                color: win.fg
+                                font.pixelSize: 12
+                            }
+                            Label {
+                                text: "overwritten content inside old extents — rewrite or defragment the files to reclaim it"
+                                color: win.fgDim
+                                font.pixelSize: 10
+                                wrapMode: Label.WordWrap
+                                width: parent.width
+                            }
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        radius: 12
+                        color: win.card
+                        border.color: Qt.alpha(win.fgDim, 0.3)
+                        border.width: 1
+                        implicitHeight: cmpCol.implicitHeight + 24
+                        Column {
+                            id: cmpCol
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 16
+                            anchors.rightMargin: 16
+                            spacing: 3
+                            Label {
+                                text: win.insights.physical === true
+                                    ? "physical sampling (-p)" : "logical sampling"
+                                color: win.cCyan
+                                font.bold: true
+                            }
+                            Label {
+                                text: win.insights.physical === true
+                                    ? "on-disk bytes after compression and CoW — the number that matters when the disk is nearly full"
+                                    : "file-logical sizes: compression and CoW sharing are invisible here — rescan with the physical option (o) to estimate real disk cost"
+                                color: win.fg
+                                font.pixelSize: 11
+                                wrapMode: Label.WordWrap
+                                width: parent.width
+                            }
+                            Label {
+                                visible: win.insights.metadata !== undefined
+                                text: win.insights.metadata !== undefined
+                                    ? "metadata overhead: " + win.insights.metadata.sizeText : ""
+                                color: win.fgDim
+                                font.pixelSize: 10
+                            }
+                        }
+                    }
+                }
+            } // tab 2: insights page
+
+            // tab 3: compare — track usage changes against a saved baseline
+            ColumnLayout {
+                spacing: 12
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: 12
+                    color: win.card
+                    border.color: Qt.alpha(win.fgDim, 0.3)
+                    border.width: 1
+                    implicitHeight: cmpCtlCol.implicitHeight + 24
+                    ColumnLayout {
+                        id: cmpCtlCol
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: 18
+                        anchors.rightMargin: 18
+                        spacing: 6
+                        Label {
+                            text: "compare the live tree against a previously saved export — what grew or shrank since the baseline"
+                            color: win.fgDim
+                            font.pixelSize: 11
+                            wrapMode: Label.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        RowLayout {
+                            spacing: 10
+                            Label {
+                                text: win.cmp.hasBaseline === true
+                                    ? ("baseline: " + win.cmp.baselineFile
+                                        + "  ·  " + win.cmp.baseUsedText)
+                                    : (win.cmp.baselineError !== undefined
+                                        ? ("baseline error: " + win.cmp.baselineError)
+                                        : "no baseline loaded")
+                                color: win.cmp.hasBaseline === true ? win.cGreen : win.cYellow
+                                font.pixelSize: 12
+                                Layout.fillWidth: true
+                                elide: Label.ElideMiddle
+                            }
+                            OmButton {
+                                text: "open baseline…"
+                                onClicked: baseOpenDialog.open()
+                            }
+                            OmButton {
+                                text: "save current scan…"
+                                onClicked: exportSaveDialog.open()
+                            }
+                            OmButton {
+                                text: "clear"
+                                btnEnabled: win.cmp.hasBaseline === true
+                                onClicked: { logic.clearBaseline(); refreshCompare(); }
+                            }
+                        }
+                        Label {
+                            text: win.saveNote
+                            visible: win.saveNote.length > 0
+                            color: win.fgDim
+                            font.pixelSize: 11
+                        }
+                        Label {
+                            text: win.cmpDeltaSort ? "sorted by change (c toggles to size order)"
+                                                  : "sorted by current size (c toggles to change order)"
+                            color: win.fgDim
+                            font.pixelSize: 10
+                            font.italic: true
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 12
+                    color: win.card
+                    border.color: Qt.alpha(win.fgDim, 0.3)
+                    border.width: 1
+                    Label {
+                        anchors.centerIn: parent
+                        visible: win.cmp.hasBaseline !== true
+                        width: parent.width - 60
+                        horizontalAlignment: Label.AlignHCenter
+                        wrapMode: Label.WordWrap
+                        text: "save the current scan as a baseline, keep using the disk, then rescan and come back — deltas appear here.\nfor accuracy use the same sampling parameters (seed, budget) for both runs."
+                        color: win.fgDim
+                    }
+                    ListView {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        clip: true
+                        visible: win.cmp.hasBaseline === true
+                        model: win.cmp.rows || []
+                        boundsBehavior: Flickable.StopAtBounds
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: ListView.view.width
+                            height: mvCol.implicitHeight + 12
+                            radius: 7
+                            color: "transparent"
+                            Column {
+                                id: mvCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 8
+                                spacing: 2
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 10
+                                    Label {
+                                        text: modelData.grown ? "▲" : "▼"
+                                        color: modelData.grown ? win.cRed : win.cGreen
+                                        font.bold: true
+                                    }
+                                    Label {
+                                        text: modelData.name
+                                        color: win.fgBright
+                                        font.bold: true
+                                        elide: Label.ElideMiddle
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: (modelData.isNew ? "new  " : modelData.isGone ? "deleted  " : "")
+                                            + modelData.deltaText
+                                        color: modelData.grown ? win.cRed : win.cGreen
+                                        font.bold: true
+                                    }
+                                }
+                                Label {
+                                    text: "now " + modelData.curText + "  ·  was "
+                                        + modelData.baseText + "  ·  " + modelData.path
+                                    color: win.fgDim
+                                    font.pixelSize: 10
+                                    elide: Label.ElideMiddle
+                                    width: parent.width
+                                }
+                            }
+                        }
+                    }
+                }
+            } // tab 3: compare page
+        } // StackLayout pages
+    } // body
 
     // ------------------------------------------------------------ footer
     footer: Rectangle {
@@ -1044,7 +1459,7 @@ ApplicationWindow {
             spacing: 14
             Label { text: "theme: " + win.themeName; color: win.fgDim; font.pixelSize: 10 }
             Label {
-                text: "↑↓/click select · →/Space open · ← up · / filter · o options · i details · ? keys"
+                text: "↑↓/click select · →/Space open · ← up · / filter · o options · i details · 1/2/3 tabs · ? keys"
                 color: win.fgDim
                 font.pixelSize: 10
             }
@@ -1335,13 +1750,36 @@ ApplicationWindow {
             KeyRow { keys: "r"; action: "rescan" }
             KeyRow { keys: "Esc"; action: "close popup · leave the filter" }
             KeyRow { keys: "?"; action: "this help" }
+            KeyRow { keys: "1 2 3 / t"; action: "browse · insights · compare tabs / cycle tabs" }
+            KeyRow { keys: "c"; action: "compare tab: sort by change vs current size" }
             KeyRow { keys: "mouse"; action: "click a folder to open it, a file to select it" }
         }
     }
 
+    // Baseline / export file dialogs for the compare tab.
+    FileDialog {
+        id: baseOpenDialog
+        title: "Open baseline export"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["btdu exports (*.json)", "all files (*)"]
+        onAccepted: { logic.setBaseline(selectedFile); refreshCompare(); }
+    }
+    FileDialog {
+        id: exportSaveDialog
+        title: "Save current scan as baseline"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "json"
+        nameFilters: ["btdu exports (*.json)"]
+        onAccepted: {
+            var r = JSON.parse(logic.saveExport(selectedFile) || '{"ok":false}');
+            win.saveNote = r.ok === true
+                ? ("saved baseline to " + r.path)
+                : ("save failed: " + (r.error || "unknown error"));
+        }
+    }
+
     // Row geometry export for the click-inertness probe.
-    Timer {
-        interval: 150
+    Timer {        interval: 150
         running: true
         repeat: true
         onTriggered: {
@@ -1409,6 +1847,31 @@ ApplicationWindow {
         sequence: "?"
         enabled: !win.typing && !win.anyPopup
         onActivated: helpPopup.open()
+    }
+    Shortcut {
+        sequence: "1"
+        enabled: !win.typing && !win.anyPopup
+        onActivated: setTab(0)
+    }
+    Shortcut {
+        sequence: "2"
+        enabled: !win.typing && !win.anyPopup
+        onActivated: setTab(1)
+    }
+    Shortcut {
+        sequence: "3"
+        enabled: !win.typing && !win.anyPopup
+        onActivated: setTab(2)
+    }
+    Shortcut {
+        sequence: "t"
+        enabled: !win.typing && !win.anyPopup
+        onActivated: setTab((win.activeTab + 1) % 3)
+    }
+    Shortcut {
+        sequence: "c"
+        enabled: !win.typing && !win.anyPopup && win.activeTab === 2
+        onActivated: toggleCmpSort()
     }
     Shortcut {
         sequence: "F1"

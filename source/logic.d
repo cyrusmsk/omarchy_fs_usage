@@ -408,6 +408,265 @@ public:
 		}
 	}
 
+	// ------------------------------------------------- insights (tab 2)
+
+	/// Snapshot-size estimator (a btdu use case): extents shared with
+	/// snapshots are attributed to the shortest path, so with fixed-length
+	/// lexicographically-ordered snapshot names each snapshot's size reads
+	/// as the amount of "new" data it introduced. Lists snapshot-like
+	/// nodes (snapshot dirs, date-named rows, deleted subvolumes still
+	/// holding extents) with their exclusive ("own") sizes. Returned as a
+	/// JSON array string; needs expert mode for the own/shared split.
+	@QSlot final QString snapshotsJson()
+	{
+		string[] out_;
+		if (treeRoot !is null)
+		{
+			struct Hit
+			{
+				ScanNode* n;
+				string path;
+			}
+			Hit[] hits;
+			void walk(ScanNode* n, string prefix)
+			{
+				foreach (i; 0 .. n.children.length)
+				{
+					auto c = &n.children[i];
+					string p = prefix.length ? prefix ~ "/" ~ c.name : c.name;
+					if (isSnapshotLike(c.name, prefix))
+						hits ~= Hit(c, p);
+					walk(c, p);
+				}
+			}
+			walk(treeRoot, null);
+			sort!((a, b) => a.n.samples > b.n.samples)(hits);
+			enum cap = 100;
+			foreach (h; hits[0 .. hits.length < cap ? hits.length : cap])
+			{
+				auto info = nodeInfo(*h.n);
+				Json row = Json(false);
+				row.str("name", info.display);
+				row.str("path", sanitize(h.path));
+				row.str("sizeText", humanSize(sizeBytes(h.n.samples)));
+				if (lastExpert && h.n.samples > 0)
+				{
+					ulong own = h.n.exclusive <= h.n.samples ? h.n.exclusive : h.n.samples;
+					ulong sh = h.n.shared_ <= h.n.samples ? h.n.shared_ : 0;
+					row.str("ownText", humanSize(sizeBytes(own)) ~ " new");
+					row.str("sharedText", humanSize(sizeBytes(sh)) ~ " shared");
+					row.num("ownPct", round1(own * 100.0 / h.n.samples));
+				}
+				out_ ~= row.finish();
+			}
+		}
+		Json top = Json(false);
+		top.boolean("expert", lastExpert);
+		top.key("rows");
+		top.buf.put(jsonArray(out_));
+		return toQString(top.finish());
+	}
+
+	/// One JSON object for the Insights tab: sampling accuracy (samples,
+	/// resolution, elapsed, budget, stop conditions), the <UNUSED> "dark
+	/// matter" size, and mode-aware compression/metadata notes.
+	@QSlot final QString insightsJson()
+	{
+		Json j = Json(false);
+		j.boolean("ready", treeRoot !is null);
+		j.boolean("running", running);
+		j.boolean("expert", lastExpert);
+		j.boolean("physical", lastPhysical);
+		// sampling accuracy: results land instantly and sharpen the
+		// longer btdu runs (~100 samples give ~1% resolution)
+		{
+			Json a = Json(false);
+			a.num("samples", cast(long) rootSamples);
+			a.num("budget", cast(long) lastBudget);
+			a.str("resolution", rootSamples > 1
+				? humanSize(totalSize / rootSamples) : "?");
+			a.str("usedText", humanSize(totalSize));
+			a.str("seed", opts.seed);
+			a.str("minRes", opts.minResolution);
+			a.str("maxTime", opts.maxTime);
+			j.key("accuracy");
+			j.buf.put(a.finish());
+		}
+		// dark matter: unreachable parts of extents (overwritten content
+		// no live file covers) - reclaimable by rewrite/defragmentation
+		if (auto u = findByRaw(treeRoot, "\0UNUSED"))
+		{
+			Json d = Json(false);
+			d.str("sizeText", humanSize(sizeBytes(u.samples)));
+			d.num("pct", rootSamples
+				? round1(u.samples * 100.0 / rootSamples) : 0);
+			j.key("darkMatter");
+			j.buf.put(d.finish());
+		}
+		if (auto m = findByRaw(treeRoot, "\0METADATA"))
+		{
+			Json d = Json(false);
+			d.str("sizeText", humanSize(sizeBytes(m.samples)));
+			j.key("metadata");
+			j.buf.put(d.finish());
+		}
+		return toQString(j.finish());
+	}
+
+	// -------------------------------------------------- compare (tab 3)
+
+	/// Load a previously saved export as the compare baseline. Deltas are
+	/// computed client-side against the live tree (btdu itself only pairs
+	/// them at display time), in bytes, each side converted with its own
+	/// total/rootSamples. For accuracy use the same sampling parameters
+	/// for both runs (fixed seed, same budget).
+	@QSlot final void setBaseline(ref const(QString) path)
+	{
+		baselineRoot = null;
+		baselineError = null;
+		baselinePath = toDString(path);
+		if (!baselinePath.length)
+			return;
+		try
+		{
+			auto r = ScanJob.parseExportFile(baselinePath);
+			if (r.error.length)
+				throw new Exception(r.error);
+			auto flat = flattenProfiles(r.root);
+			baselineRoot = new ScanNode;
+			*baselineRoot = flat;
+			baselineTotal = r.totalSize;
+			baselineRootSamples = r.root.samples > 0 ? r.root.samples : 1;
+		}
+		catch (Throwable e)
+		{
+			baselineRoot = null;
+			baselineError = e.msg;
+		}
+		if (treeRoot !is null)
+			rebuildView(); // refresh the per-row delta annotations
+	}
+
+	@QSlot final void clearBaseline()
+	{
+		baselineRoot = null;
+		baselinePath = null;
+		baselineError = null;
+		if (treeRoot !is null)
+			rebuildView();
+	}
+
+	/// btdu's compare keys: `c` sorts by delta, `s` by absolute size.
+	@QSlot final void setCompareSortByDelta(bool v)
+	{
+		compareSortByDelta = v;
+	}
+
+	/// Top movers between the baseline and the live tree, as a JSON
+	/// object string: {hasBaseline, baselineFile, baselineError, sort,
+	/// baseUsedText, rows: [{path, name, kind, curText, baseText,
+	/// deltaText, deltaBytes, grown}]}. Missing on either side reads as
+	/// zero ("new" / "deleted" rows).
+	@QSlot final QString compareJson()
+	{
+		Json j = Json(false);
+		j.boolean("hasBaseline", baselineRoot !is null);
+		if (baselinePath.length)
+		{
+			import std.path : baseName;
+			try
+				j.str("baselineFile", baseName(baselinePath));
+			catch (Throwable)
+				j.str("baselineFile", baselinePath);
+		}
+		if (baselineError.length)
+			j.str("baselineError", baselineError);
+		j.boolean("sortByDelta", compareSortByDelta);
+		if (baselineRoot is null)
+			return toQString(j.finish());
+
+		ulong[string] cur = pathSamples(treeRoot);
+		ulong[string] base = pathSamples(baselineRoot);
+
+		struct Mover
+		{
+			string path;
+			long delta;
+			ulong curS;
+			ulong baseS;
+		}
+		Mover[] movers;
+		foreach (p, s; cur)
+		{
+			ulong b = p in base ? base[p] : 0;
+			long d = cast(long) sizeBytes(s) - cast(long) baseBytes(b);
+			if (d != 0 || b == 0)
+				movers ~= Mover(p, d, s, b);
+		}
+		foreach (p, b; base)
+			if (!(p in cur))
+				movers ~= Mover(p, -cast(long) baseBytes(b), 0, b);
+		if (compareSortByDelta)
+			sort!((a, b) => (a.delta < 0 ? -a.delta : a.delta)
+				> (b.delta < 0 ? -b.delta : b.delta))(movers);
+		else
+			sort!((a, b) => sizeBytes(a.curS) > sizeBytes(b.curS))(movers);
+
+		j.str("baseUsedText", humanSize(baselineTotal));
+		string[] rows;
+		enum cap = 60;
+		foreach (m; movers[0 .. movers.length < cap ? movers.length : cap])
+		{
+			string leaf = m.path;
+			foreach_reverse (i, c; m.path)
+				if (c == '/')
+				{
+					leaf = m.path[i + 1 .. $];
+					break;
+				}
+			Json r = Json(false);
+			r.str("path", sanitize(m.path));
+			r.str("name", sanitize(leaf));
+			r.str("curText", m.curS ? humanSize(sizeBytes(m.curS)) : "—");
+			r.str("baseText", m.baseS ? humanSize(baseBytes(m.baseS)) : "—");
+			r.str("deltaText", (m.delta < 0 ? "-" : "+")
+				~ humanSize(m.delta < 0 ? cast(ulong) -m.delta : cast(ulong) m.delta));
+			r.num("deltaBytes", m.delta);
+			r.boolean("grown", m.delta > 0);
+			r.boolean("isNew", m.baseS == 0);
+			r.boolean("isGone", m.curS == 0);
+			rows ~= r.finish();
+		}
+		j.key("rows");
+		j.buf.put(jsonArray(rows));
+		return toQString(j.finish());
+	}
+
+	/// Copy the latest finished scan (or import) export to `dest`,
+	/// e.g. to keep a baseline for compare mode. Returns {ok, error?}.
+	@QSlot final QString saveExport(ref const(QString) dest)
+	{
+		Json j = Json(false);
+		string d = stripFileUrl(toDString(dest));
+		try
+		{
+			if (!d.length)
+				throw new Exception("no destination file given");
+			if (!lastExportPath.length || !lastExportPath.exists)
+				throw new Exception("no finished scan to save yet");
+			import std.file : copy;
+			copy(lastExportPath, d);
+			j.boolean("ok", true);
+			j.str("path", d);
+		}
+		catch (Throwable e)
+		{
+			j.boolean("ok", false);
+			j.str("error", e.msg);
+		}
+		return toQString(j.finish());
+	}
+
 	@QSlot final void goToLevel(int level)
 	{
 		if (level >= 0 && level + 1 <= stack.length && level != cast(int) stack.length - 1)
@@ -475,6 +734,8 @@ private:
 			s.str("fsid", r.fsid);
 			s.str("note", "imported from " ~ path ~ " (offline view - start a scan to refresh)");
 			setSummaryJson(s.finish());
+			// An import is itself a usable export (e.g. as compare baseline).
+			lastExportPath = path;
 			return true;
 		}
 		catch (Throwable e)
@@ -514,6 +775,9 @@ private:
 			return;
 
 		running = false;
+		// Retain the export backing this result: "save as baseline" and
+		// re-saves copy this file, since the btdu process is gone.
+		lastExportPath = job.exportFile;
 		job = null;
 
 		if (r.error.length)
@@ -584,6 +848,16 @@ private:
 
 		enum rowLimit = 500;
 		string[] rows;
+		// Compare mode annotates each row with its delta against the
+		// baseline (matched by relative path).
+		ulong[string] baseMap;
+		string levelPath;
+		bool withDelta = baselineRoot !is null;
+		if (withDelta)
+		{
+			baseMap = pathSamples(baselineRoot);
+			levelPath = currentRelPath();
+		}
 		foreach (i, k; kids)
 		{
 			auto info = nodeInfo(*k);
@@ -614,6 +888,20 @@ private:
 					? "~" ~ humanSize(sizeBytes(sh)) ~ " shared" : "");
 			}
 			row.num("pct", round1(k.samples * 100.0 / denom));
+			if (withDelta)
+			{
+				string rp = levelPath.length
+					? levelPath ~ "/" ~ k.name : k.name;
+				ulong b = rp in baseMap ? baseMap[rp] : 0;
+				long d = cast(long) sizeBytes(k.samples)
+					- cast(long) baseBytes(b);
+				if (d == 0)
+					row.str("deltaText", "=");
+				else
+					row.str("deltaText", (d < 0 ? "-" : "+")
+						~ humanSize(d < 0 ? cast(ulong) -d : cast(ulong) d));
+				row.num("deltaBytes", d);
+			}
 			rows ~= row.finish();
 		}
 
@@ -658,6 +946,135 @@ private:
 	ulong sizeBytes(ulong samples)
 	{
 		return rootSamples > 1 ? samples * totalSize / rootSamples : 0;
+	}
+
+	/// Same conversion for the compare baseline (its own total/samples).
+	ulong baseBytes(ulong samples)
+	{
+		return baselineRootSamples > 1
+			? samples * baselineTotal / baselineRootSamples : 0;
+	}
+
+	/// Relative path (raw node names) of the current view level.
+	string currentRelPath()
+	{
+		if (stack.length <= 1)
+			return null;
+		string[] parts;
+		foreach (nodep; stack[1 .. $])
+			parts ~= nodep.name;
+		return parts.join("/");
+	}
+
+	/// Full relative-path -> represented-samples map of a result tree.
+	static ulong[string] pathSamples(ScanNode* root)
+	{
+		ulong[string] map;
+		if (root is null)
+			return map;
+		void walk(ScanNode* n, string prefix)
+		{
+			foreach (i; 0 .. n.children.length)
+			{
+				auto c = &n.children[i];
+				string p = prefix.length ? prefix ~ "/" ~ c.name : c.name;
+				map[p] = c.samples;
+				walk(c, p);
+			}
+		}
+		walk(root, null);
+		return map;
+	}
+
+	/// First node with the given raw name (\0-prefixed buckets), if any.
+	static ScanNode* findByRaw(ScanNode* root, string raw)
+	{
+		if (root is null)
+			return null;
+		if (root.name == raw)
+			return root;
+		foreach (i; 0 .. root.children.length)
+			if (auto f = findByRaw(&root.children[i], raw))
+				return f;
+		return null;
+	}
+
+	/// Snapshot-like node names for the snapshot-size estimator:
+	/// snapshot dirs, date-named rows (YYYY-MM-DD…), children of a
+	/// snapshots directory, and deleted subvolumes still holding extents.
+	static bool isSnapshotLike(string name, string parentPath)
+	{
+		if (name is null || !name.length)
+			return false;
+		string tag = name.length > 1 && name[0] == 0 ? name[1 .. $] : name;
+		if (tag.startsWith("TREE_"))
+			return true; // deleted subvolume still holding extents
+		if (name[0] == 0)
+			return false; // other btdu buckets, not snapshots
+		if (name.toLower.indexOf("snapshot") >= 0)
+			return true;
+		if (dateNamed(name))
+			return true;
+		if (parentPath.length)
+		{
+			string leaf = parentPath;
+			foreach_reverse (i, c; parentPath)
+				if (c == '/')
+				{
+					leaf = parentPath[i + 1 .. $];
+					break;
+				}
+			if (leaf == ".snapshots" || leaf == "snapshots")
+				return true;
+		}
+		return false;
+	}
+
+	private static bool dateNamed(string n)
+	{
+		if (n.length < 10 || n[4] != '-' || n[7] != '-')
+			return false;
+		foreach (i; [0, 1, 2, 3, 5, 6, 8, 9])
+			if (n[i] < '0' || n[i] > '9')
+				return false;
+		return true;
+	}
+
+	/// QML FileDialog hands us file:// URLs; keep the local path.
+	private static string stripFileUrl(string s)
+	{
+		if (s.startsWith("file://"))
+			s = s["file://".length .. $];
+		if (s.indexOf('%') < 0)
+			return s;
+		auto app = appender!string;
+		for (size_t i; i < s.length;)
+		{
+			if (s[i] == '%' && i + 2 < s.length
+					&& isHexDigit(s[i + 1]) && isHexDigit(s[i + 2]))
+			{
+				app.put(cast(char) (hexVal(s[i + 1]) * 16 + hexVal(s[i + 2])));
+				i += 3;
+			}
+			else
+				app.put(s[i++]);
+		}
+		return app.data;
+	}
+
+	private static bool isHexDigit(char c)
+	{
+		return (c >= '0' && c <= '9')
+			|| (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+	}
+
+	private static int hexVal(char c)
+	{
+		if (c >= '0' && c <= '9')
+			return c - '0';
+		if (c >= 'a' && c <= 'f')
+			return c - 'a' + 10;
+		return c - 'A' + 10;
 	}
 
 	static double round1(double v)
@@ -777,6 +1194,14 @@ private:
 	ScanNode*[] viewRows;
 	ulong totalSize, rootSamples;
 	bool sortByName;
+
+	// ------------------------------------------------- advanced tabs
+
+	string lastExportPath; /// export of the latest finished scan/import (save-as)
+	ScanNode* baselineRoot; /// parsed compare baseline (null when inactive)
+	ulong baselineTotal, baselineRootSamples;
+	string baselinePath, baselineError;
+	bool compareSortByDelta = true;
 
 	mixin(CREATE_CONVENIENCE_WRAPPERS);
 }

@@ -1,7 +1,9 @@
 .dub
 docs.json
 __dummy.html
-docs/
+# generated documentation (hand-written docs in docs/ are tracked)
+docs/*
+!docs/*.md
 /omarchy_fs_usage
 omarchy_fs_usage.so
 omarchy_fs_usage.dylib
@@ -10,8 +12,18 @@ libomarchy_fs_usage.a
 omarchy_fs_usage.a
 omarchy_fs_usage.lib
 omarchy_fs_usage-test-*
+__test__/
 *.exe
 *.pdb
 *.o
 *.obj
 *.lst
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+core
+core.*
+*.core
+*.dmp
