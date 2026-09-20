@@ -44,9 +44,6 @@ The dqt bindings come from upstream master as a git dependency
 
 MIT — see [LICENSE](LICENSE). 
 
-`btdu` is a separate project by CyberShadow; 
+[btdu](https://github.com/CyberShadow/btdu) is GPL-2.0 sampling disk usage profiler for btrfs by CyberShadow; 
 
-dqt is LGPL-3.0 by Tim Schendekehl.
-
-[btdu]: https://github.com/CyberShadow/btdu
-[dqt]: https://github.com/tim-dlang/dqt
+[dqt](https://github.com/tim-dlang/dqt) is LGPL-3.0 D bindings for the Qt Toolkit by Tim Schendekehl.
