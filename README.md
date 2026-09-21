@@ -12,6 +12,12 @@ advanced tabs: **Insights** (sampling accuracy, snapshot sizes,
 unreachable space, compression/physical notes) and **Compare** (disk
 usage changes against a saved baseline).
 
+## Disclaimer
+This project uses AI-generated content and/or AI-assisted functionality.
+AI outputs may be inaccurate, incomplete, or inappropriate. 
+Use this project at your own risk and verify important results independently. 
+The authors are not responsible for any consequences arising from the use of AI-generated outputs.
+
 ![screenshot](screenshot.png)
 
 * **Theme** — colors follow the active Omarchy theme (`omarchy theme set …`).
@@ -42,8 +48,8 @@ The dqt bindings come from upstream master as a git dependency
 
 ## License
 
-MIT — see [LICENSE](LICENSE). 
+MIT — see [LICENSE](LICENSE)
 
-[btdu](https://github.com/CyberShadow/btdu) is GPL-2.0 sampling disk usage profiler for btrfs by CyberShadow; 
+[btdu](https://github.com/CyberShadow/btdu) is GPL-2.0 sampling disk usage profiler for btrfs by CyberShadow
 
-[dqt](https://github.com/tim-dlang/dqt) is LGPL-3.0 D bindings for the Qt Toolkit by Tim Schendekehl.
+[dqt](https://github.com/tim-dlang/dqt) is LGPL-3.0 D bindings for the Qt Toolkit by Tim Schendekehl
